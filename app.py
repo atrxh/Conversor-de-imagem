@@ -4,19 +4,17 @@ import tempfile
 import threading
 import subprocess
 from pathlib import Path
+from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
-from tkinter import filedialog, messagebox
 from PIL import Image, ImageDraw
-
-from config import (
-    ACCENT, ACCENT_HOVER, DANGER, FONT_HUD, FONT_SMALL, FONT_SMALL_BOLD,
-    FONT_SUBTITLE, FONT_TITLE, IMAGE_TYPES, SUCCESS, APP_NAME, APP_VERSION, ICON_NAME
-)
-from core.converter import ImageConverter
-from theme import THEMES, ThemeManager
+from config import *
+from theme import ThemeManager
 from ui.file_row import FileRow
 from ui.elevated_button import ElevatedButton
+from ui.format_selector import FormatSelector
+from core.converter import process_batch
+
 
 class PixelShiftApp(ctk.CTk):
     def __init__(self):
@@ -24,8 +22,8 @@ class PixelShiftApp(ctk.CTk):
         super().__init__()
 
         self.title(APP_NAME)
-        self.geometry("1180x760")
-        self.minsize(1040, 700)
+        self.geometry("1100x720")
+        self.minsize(1000, 680)
         self.resizable(True, True)
 
         self.theme = ThemeManager(self)
@@ -33,7 +31,6 @@ class PixelShiftApp(ctk.CTk):
         self.custom_names = {}
         self.rows = {}
         self.cancel_event = threading.Event()
-        self.converter = ImageConverter()
         self.destination = None
         self.conversion_running = False
 
@@ -41,6 +38,10 @@ class PixelShiftApp(ctk.CTk):
         self.configure(fg_color=THEMES["dark"]["bg"])
         self._build_ui()
         self.apply_theme()
+
+    # --------------------------------------------------------
+    # UI
+    # --------------------------------------------------------
 
     def _build_ui(self):
         self.grid_columnconfigure(0, weight=42)
@@ -73,7 +74,7 @@ class PixelShiftApp(ctk.CTk):
         self.description.pack(fill="x", pady=(0, 20))
 
         self.info_card = ctk.CTkFrame(
-            self.left, corner_radius=7, border_width=1
+            self.left, corner_radius=0, border_width=1
         )
         self.info_card.pack(fill="x", pady=(0, 15))
 
@@ -103,7 +104,7 @@ class PixelShiftApp(ctk.CTk):
         ctk.CTkFrame(self.info_card, height=10, fg_color="transparent").pack()
 
         self.right = ctk.CTkFrame(
-            self, corner_radius=8, border_width=1
+            self, corner_radius=0, border_width=1
         )
         self.right.grid(
             row=0, column=1, padx=(15, 30), pady=25, sticky="nsew"
@@ -121,13 +122,13 @@ class PixelShiftApp(ctk.CTk):
 
         self.theme_button = ElevatedButton(
             self.hud,
-            shadow_color=THEMES["dark"]["button_shadow"],
-            text="☀  TEMA CLARO",
+            text="TEMA CLARO",
             command=self.toggle_theme,
-            font=("Segoe UI", 10, "bold"),
-            width=158,
-            height=29,
-            corner_radius=5,
+            font=FONT_SMALL_BOLD,
+            width=100,
+            height=27,
+            corner_radius=0,
+            depth=4,
         )
         self.theme_button.pack(side="right", padx=(4, 10), pady=7)
 
@@ -138,61 +139,149 @@ class PixelShiftApp(ctk.CTk):
 
         self.body = ctk.CTkFrame(self.right, fg_color="transparent")
         self.body.pack(fill="both", expand=True, padx=20, pady=13)
-        self.body.grid_columnconfigure(0, weight=1)
-        self.body.grid_rowconfigure(2, weight=1, minsize=150)
 
-        self.selection_header = self._section_header(self.body, "1. SELEÇÃO DE ARQUIVOS")
-        self.selection_header.grid(row=0, column=0, sticky="ew", pady=(0, 5))
-        self.clear_button = ElevatedButton(self.selection_header, shadow_color=THEMES["dark"]["button_shadow"], text="Limpar Fila", command=self.clear_queue, font=FONT_SMALL, width=78, height=24, corner_radius=4)
+        # 1. Arquivos
+        self.selection_header = self._section_header(
+            self.body, "1. SELEÇÃO DE ARQUIVOS"
+        )
+        self.clear_button = ElevatedButton(
+            self.selection_header,
+            text="× LIMPAR FILA",
+            command=self.clear_queue,
+            font=FONT_SMALL_BOLD,
+            width=112,
+            height=25,
+            depth=4,
+            corner_radius=0,
+        )
         self.clear_button.pack(side="right")
 
-        self.add_button = ElevatedButton(self.body, shadow_color=THEMES["dark"]["button_shadow"], text="+ ADICIONAR IMAGENS", command=self.select_images, font=FONT_HUD, height=36, corner_radius=6, border_width=2)
-        self.add_button.grid(row=1, column=0, sticky="ew", pady=(0, 7))
+        self.add_button = ElevatedButton(
+            self.body,
+            text="+ ADICIONAR IMAGENS",
+            command=self.select_images,
+            font=FONT_HUD,
+            height=35,
+            corner_radius=0,
+            border_width=1,
+        )
+        self.add_button.pack(fill="x", pady=(0, 6))
 
-        self.file_list = ctk.CTkScrollableFrame(self.body, height=175, corner_radius=4, border_width=1)
-        self.file_list.grid(row=2, column=0, sticky="nsew", pady=(0, 8))
-        self.empty_label = ctk.CTkLabel(self.file_list, text="Nenhum arquivo na fila.", font=FONT_SUBTITLE)
+        self.file_list = ctk.CTkScrollableFrame(
+            self.body,
+            height=175,
+            corner_radius=0,
+            border_width=1,
+        )
+        self.file_list.pack(fill="both", expand=True, pady=(0, 8))
+
+        self.empty_label = ctk.CTkLabel(
+            self.file_list,
+            text="Nenhum arquivo na fila.",
+            font=FONT_SUBTITLE,
+        )
         self.empty_label.pack(pady=42)
 
-        self.rename_hint = ctk.CTkLabel(self.body, text="💡 Dica: depois de adicionar uma imagem, clique no nome para renomeá-la antes da conversão.", font=FONT_SMALL, justify="left", anchor="w", wraplength=700)
-        self.rename_hint.grid(row=3, column=0, sticky="ew", pady=(0, 9))
+        self.rename_hint = ctk.CTkLabel(
+            self.body,
+            text="💡 Dica: depois de adicionar uma imagem, clique no nome para renomeá-la antes da conversão.",
+            font=FONT_SMALL,
+            justify="left",
+            anchor="w",
+            wraplength=560,
+        )
+        self.rename_hint.pack(fill="x", pady=(0, 9))
 
-        self.format_header = self._section_header(self.body, "2. FORMATO DESTINO")
-        self.format_header.grid(row=4, column=0, sticky="ew", pady=(0, 5))
-        self.folder_button = ElevatedButton(self.format_header, shadow_color=THEMES["dark"]["button_shadow"], text="📁  Abrir pasta de conversões", command=self.open_conversion_folder, font=("Segoe UI", 10), width=178, height=28, corner_radius=5)
-        self.folder_button.pack(side="right")
+        # 2. Formato
+        self.format_header = self._section_header(
+            self.body, "2. FORMATO DESTINO"
+        )
 
-        self.format_menu = ctk.CTkOptionMenu(self.body, values=["PNG", "JPEG", "WEBP", "BMP", "GIF"], font=FONT_HUD, height=36, corner_radius=4)
-        self.format_menu.set("PNG")
-        self.format_menu.grid(row=5, column=0, sticky="ew", pady=(0, 11))
+        self.folder_hint = ctk.CTkLabel(
+            self.format_header,
+            text="ABRIR PASTA DE CONVERSÕES",
+            font=FONT_SMALL,
+        )
+        self.folder_hint.pack(side="right", padx=(0, 14))
 
-        self.progress_header = self._section_header(self.body, "3. PROGRESSO DA OPERAÇÃO")
-        self.progress_header.grid(row=6, column=0, sticky="ew", pady=(0, 5))
-        self.progress = ctk.CTkProgressBar(self.body, height=7, corner_radius=2)
+        self.folder_button = ElevatedButton(
+            self.format_header,
+            text="📁",
+            command=self.open_conversion_folder,
+            font=("Segoe UI Symbol", 13),
+            width=36,
+            height=25,
+            corner_radius=0,
+        )
+        self.folder_button.pack(side="right", padx=(0, 6))
+
+        self.format_menu = FormatSelector(
+            self.body,
+            values=["PNG", "JPEG", "WEBP", "BMP", "GIF"],
+            initial="PNG",
+            font=FONT_MONO_BOLD,
+            height=40,
+        )
+        self.format_menu.pack(fill="x", pady=(1, 13))
+        self.format_menu.pack_propagate(False)
+
+        # 3. Progresso
+        self.progress_header = self._section_header(
+            self.body, "3. PROGRESSO DA OPERAÇÃO"
+        )
+
+        self.progress = ctk.CTkProgressBar(
+            self.body, height=6, corner_radius=0
+        )
         self.progress.set(0)
-        self.progress.grid(row=7, column=0, sticky="ew", pady=(0, 6))
+        self.progress.pack(fill="x", pady=(0, 5))
 
-        self.status = ctk.CTkLabel(self.body, text="Aguardando início...", font=FONT_SUBTITLE, anchor="w")
-        self.status.grid(row=8, column=0, sticky="ew", pady=(0, 8))
+        self.status = ctk.CTkLabel(
+            self.body,
+            text="Aguardando início...",
+            font=FONT_SUBTITLE,
+            anchor="w",
+        )
+        self.status.pack(fill="x", pady=(0, 8))
 
-        self.convert_button = ElevatedButton(self.body, shadow_color=THEMES["dark"]["accent_shadow"], text="INICIAR CONVERSÃO", command=self.start_conversion, font=FONT_HUD, height=42, corner_radius=6)
-        self.convert_button.grid(row=9, column=0, sticky="ew", pady=(0, 6))
-        self.cancel_button = ElevatedButton(self.body, shadow_color=THEMES["dark"]["button_shadow"], text="CANCELAR", command=self.cancel_conversion, font=FONT_SMALL_BOLD, height=28, corner_radius=4, state="disabled")
-        self.cancel_button.grid(row=10, column=0, sticky="ew")
+        self.cancel_button = ElevatedButton(
+            self.body,
+            text="CANCELAR",
+            command=self.cancel_conversion,
+            font=FONT_SMALL_BOLD,
+            height=27,
+            corner_radius=0,
+            state="disabled",
+        )
+        self.cancel_button.pack(fill="x", side="bottom", pady=(0, 6))
+
+        self.convert_button = ElevatedButton(
+            self.body,
+            text="INICIAR CONVERSÃO",
+            command=self.start_conversion,
+            font=FONT_HUD,
+            height=40,
+            corner_radius=0,
+        )
+        self.convert_button.pack(fill="x", side="bottom")
 
     def _section_header(self, parent, text):
         frame = ctk.CTkFrame(parent, fg_color="transparent", height=25)
-        frame.grid_columnconfigure(1, weight=1)
-        frame.grid_propagate(False)
+        frame.pack(fill="x", pady=(0, 4))
+        frame.pack_propagate(False)
 
-        accent = ctk.CTkFrame(frame, width=3, height=15, corner_radius=1)
-        accent.grid(row=0, column=0, padx=(0, 8), pady=5, sticky="w")
+        accent = ctk.CTkFrame(frame, width=3, height=15, corner_radius=0)
+        accent.pack(side="left", padx=(0, 8), pady=4)
 
         label = ctk.CTkLabel(
             frame, text=text, font=FONT_HUD, anchor="w"
         )
-        label.grid(row=0, column=1, sticky="w")
+        label.pack(side="left")
         return frame
+
+    # --------------------------------------------------------
+    # Theme
+    # --------------------------------------------------------
 
     def toggle_theme(self):
         self.theme.toggle()
@@ -204,21 +293,22 @@ class PixelShiftApp(ctk.CTk):
         self.configure(fg_color=c["bg"])
         self.right.configure(
             fg_color=c["card"],
-            border_color=c["border_strong"],
+            border_color=c["border"],
         )
         self.info_card.configure(
             fg_color=c["card"],
-            border_color=c["border_strong"],
+            border_color=c["border"],
         )
         self.hud.configure(fg_color=c["header"])
         self.body.configure(fg_color="transparent")
 
+        # Textos
         for widget in [self.brand_tag, self.description, self.info_header,
                        self.title_label, self.hud_title, self.rename_hint,
-                       self.status]:
+                       self.folder_hint, self.status]:
             widget.configure(text_color=c["muted"] if widget in
                              [self.brand_tag, self.description, self.rename_hint,
-                              self.status]
+                              self.folder_hint, self.status]
                              else c["text"])
 
         self.title_label.configure(text_color=c["text"])
@@ -232,82 +322,69 @@ class PixelShiftApp(ctk.CTk):
         self.ready.configure(text_color=SUCCESS)
 
         self.theme_button.configure(
-            text="☾   TEMA ESCURO" if self.theme.current == "light" else "☀   TEMA CLARO",
+            text="☼ TEMA CLARO" if self.theme.current == "dark" else "☾ TEMA ESCURO",
             fg_color=c["button"],
             hover_color=c["button_hover"],
-            border_width=2,
-            border_color=c["button_border"],
             text_color=c["text"],
+            depth_color=c["button_depth"],
+            border_color=c["border_strong"],
         )
-        self.theme_button.set_shadow_color(c["button_shadow"])
         self.clear_button.configure(
-            fg_color=c["button"],
-            hover_color=c["button_hover"],
-            border_width=2,
-            border_color=c["button_border"],
-            text_color=c["muted"],
-        )
-        self.clear_button.set_shadow_color(c["button_shadow"])
-        self.folder_button.configure(
-            fg_color=c["button"],
-            hover_color=c["button_hover"],
-            border_width=2,
-            border_color=c["button_border"],
-            text_color=c["text"],
-        )
-        self.folder_button.set_shadow_color(c["button_shadow"])
-        self.add_button.configure(
-            fg_color=c["button"],
-            hover_color=c["button_hover"],
-            border_width=2,
-            border_color=c["button_border"],
-            text_color=c["text"],
-        )
-        self.add_button.set_shadow_color(c["button_shadow"])
-        self.format_menu.configure(
             fg_color=c["surface"],
-            button_color=c["button"],
-            button_hover_color=c["button_hover"],
-            dropdown_fg_color=c["card"],
-            dropdown_hover_color=c["surface_hover"],
-            dropdown_text_color=c["text"],
+            hover_color=c["button_hover"],
             text_color=c["text"],
+            depth_color=c["button_depth"],
+            border_color=c["border_strong"],
         )
+        self.folder_button.configure(
+            fg_color=c["surface"],
+            hover_color=c["surface_hover"],
+            text_color=c["text"],
+            depth_color=c["button_depth"],
+            border_color=c["border"],
+        )
+        self.add_button.configure(
+            fg_color=c["surface"],
+            hover_color=c["surface_hover"],
+            border_color=c["border"],
+            text_color=c["text"],
+            depth_color=c["button_depth"],
+        )
+        self.format_menu.apply_theme(c)
         self.progress.configure(
             fg_color=c["surface"],
-            progress_color=ACCENT,
+            progress_color=c["border_strong"],
         )
         self.cancel_button.configure(
-            fg_color=c["button"],
+            fg_color=c["surface"],
             hover_color=c["danger_hover"],
-            border_width=2,
-            border_color=c["button_border"],
             text_color=c["muted"],
+            depth_color=c["button_depth"],
+            border_color=c["border"],
         )
-        self.cancel_button.set_shadow_color(c["button_shadow"])
         self.convert_button.configure(
-            fg_color=ACCENT,
-            hover_color=ACCENT_HOVER,
-            border_width=3,
-            border_color="#5B21B6",
-            text_color="#FFFFFF",
+            fg_color=c["button"],
+            hover_color=c["button_hover"],
+            text_color=c["text"],
+            border_color=c["border_strong"],
+            depth_color=c["button_depth"],
         )
-        self.convert_button.set_shadow_color(c["accent_shadow"])
 
         self._apply_section_accents(c)
         self._apply_file_list_theme(c)
 
     def _apply_section_accents(self, c):
+        # Os pequenos marcadores roxos reforçam a hierarquia sem mudar a identidade.
         for header in [self.selection_header, self.format_header,
                        self.progress_header]:
             for child in header.winfo_children():
                 if isinstance(child, ctk.CTkFrame):
-                    child.configure(fg_color=ACCENT)
+                    child.configure(fg_color=c["border_strong"])
 
     def _apply_file_list_theme(self, c):
         self.file_list.configure(
             fg_color=c["list_bg"],
-            border_color=c["border_strong"],
+            border_color=c["border"],
             scrollbar_button_color=c["scroll"],
             scrollbar_button_hover_color=c["scroll_hover"],
         )
@@ -315,6 +392,10 @@ class PixelShiftApp(ctk.CTk):
 
         for row in self.rows.values():
             row.apply_theme()
+
+    # --------------------------------------------------------
+    # Icon
+    # --------------------------------------------------------
 
     def set_window_icon(self):
         try:
@@ -359,6 +440,10 @@ class PixelShiftApp(ctk.CTk):
             self.iconbitmap(fallback)
         except Exception:
             pass
+
+    # --------------------------------------------------------
+    # File queue
+    # --------------------------------------------------------
 
     def select_images(self):
         types = [
@@ -416,6 +501,10 @@ class PixelShiftApp(ctk.CTk):
         self.render_file_list()
         self.progress.set(0)
 
+    # --------------------------------------------------------
+    # Destination
+    # --------------------------------------------------------
+
     def get_conversion_folder(self):
         folder = Path.home() / "Downloads" / "Conversões"
         folder.mkdir(parents=True, exist_ok=True)
@@ -431,6 +520,10 @@ class PixelShiftApp(ctk.CTk):
             else:
                 subprocess.Popen(["xdg-open", folder])
 
+    # --------------------------------------------------------
+    # Conversion
+    # --------------------------------------------------------
+
     def start_conversion(self):
         if self.conversion_running:
             return
@@ -442,6 +535,7 @@ class PixelShiftApp(ctk.CTk):
             )
             return
 
+        # Snapshot: a thread nunca lê widgets diretamente.
         files = list(self.files)
         names = {
             path: self.custom_names.get(path, Path(path).stem)
@@ -469,13 +563,49 @@ class PixelShiftApp(ctk.CTk):
             daemon=True,
         ).start()
 
-    def _process_batch(self, files, names, destination, fmt):
-        def progress_callback(current, total, filename):
-            self.after(0, self.update_progress, current, total, filename)
+    def convert_one(self, path, destination, fmt, custom_name):
+        base = (custom_name or Path(path).stem).strip()
+        base = Path(base).stem or Path(path).stem
 
-        total, success, errors = self.converter.convert_batch(
-            files, names, destination, fmt, self.cancel_event, progress_callback
-        )
+        # JPEG é salvo como .jpg para um nome mais familiar.
+        extension = "jpg" if fmt == "jpeg" else fmt
+        output = destination / f"{base}.{extension}"
+
+        counter = 1
+        while output.exists():
+            output = destination / f"{base}_{counter}.{extension}"
+            counter += 1
+
+        with Image.open(path) as original:
+            img = original.copy()
+
+        if fmt in ("jpg", "jpeg"):
+            if img.mode in ("RGBA", "LA"):
+                background = Image.new("RGB", img.size, "white")
+                if img.mode == "RGBA":
+                    background.paste(
+                        img, mask=img.getchannel("A")
+                    )
+                else:
+                    background.paste(
+                        img.convert("RGB"),
+                        mask=img.getchannel("A"),
+                    )
+                img.close()
+                img = background
+            elif img.mode not in ("RGB", "L"):
+                converted = img.convert("RGB")
+                img.close()
+                img = converted
+
+        img.save(str(output), format=fmt.upper())
+        img.close()
+        return path, output
+
+    def _process_batch(self, files, names, destination, fmt):
+        def progress(index, total, filename):
+            self.after(0, self.update_progress, index, total, filename)
+        total, success, errors = process_batch(files, names, destination, fmt, self.cancel_event, progress)
         self.after(0, self.finish_conversion, total, success, errors)
 
     def update_progress(self, current, total, filename):
@@ -545,3 +675,8 @@ class PixelShiftApp(ctk.CTk):
                 f"Processamento finalizado!\n"
                 f"{len(success)} de {total} imagens convertidas.",
             )
+
+
+if __name__ == "__main__":
+    app = PixelShiftApp()
+    app.mainloop()
