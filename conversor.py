@@ -11,15 +11,14 @@ class ConversorApp(ctk.CTk):
         super().__init__()
 
         self.title("Conversor de Imagens em Lote")
-        self.geometry("500x340")
+        self.geometry("500x380")
         self.resizable(False, False)
 
-        # Guarda a lista de caminhos selecionados
         self.caminhos_arquivos = []
 
         self.grid_columnconfigure(0, weight=1)
 
-        # 1. Cabeçalho com Switch de Tema
+        # 1. Cabeçalho
         self.frame_topo = ctk.CTkFrame(self, fg_color="transparent")
         self.frame_topo.grid(row=0, column=0, padx=20, pady=(15, 5), sticky="ew")
         self.frame_topo.grid_columnconfigure(0, weight=1)
@@ -39,7 +38,7 @@ class ConversorApp(ctk.CTk):
         self.switch_tema.select()
         self.switch_tema.grid(row=0, column=1, sticky="e")
 
-        # 2. Botão para Selecionar Múltiplas Imagens
+        # 2. Seleção de Arquivos
         self.btn_selecionar = ctk.CTkButton(
             self, 
             text="📁 Selecionar Imagem(ns)", 
@@ -48,7 +47,6 @@ class ConversorApp(ctk.CTk):
         )
         self.btn_selecionar.grid(row=1, column=0, padx=20, pady=10, sticky="ew")
 
-        # Label com contador de arquivos
         self.lbl_status = ctk.CTkLabel(
             self, 
             text="Nenhuma imagem selecionada", 
@@ -57,9 +55,9 @@ class ConversorApp(ctk.CTk):
         )
         self.lbl_status.grid(row=2, column=0, padx=20, pady=5)
 
-        # 3. Seleção do Formato
+        # 3. Opções de Formato
         self.frame_opcoes = ctk.CTkFrame(self, fg_color="transparent")
-        self.frame_opcoes.grid(row=3, column=0, padx=20, pady=10)
+        self.frame_opcoes.grid(row=3, column=0, padx=20, pady=5)
 
         self.lbl_formato = ctk.CTkLabel(self.frame_opcoes, text="Converter para:")
         self.lbl_formato.pack(side="left", padx=(0, 10))
@@ -71,7 +69,12 @@ class ConversorApp(ctk.CTk):
         self.combo_formato.set("JPEG")
         self.combo_formato.pack(side="left")
 
-        # 4. Botão para Executar a Conversão
+        # 4. Barra de Progresso (CTkProgressBar)
+        self.progresso = ctk.CTkProgressBar(self, height=12)
+        self.progresso.grid(row=4, column=0, padx=20, pady=15, sticky="ew")
+        self.progresso.set(0)  # Inicia zerada (recebe valores de 0.0 a 1.0)
+
+        # 5. Botão de Ação
         self.btn_converter = ctk.CTkButton(
             self, 
             text="⚡ Converter Todas e Salvar", 
@@ -80,7 +83,7 @@ class ConversorApp(ctk.CTk):
             fg_color="#2FA572", 
             hover_color="#1E6B4A"
         )
-        self.btn_converter.grid(row=4, column=0, padx=20, pady=(15, 20), sticky="ew")
+        self.btn_converter.grid(row=5, column=0, padx=20, pady=(5, 20), sticky="ew")
 
     def alternar_tema(self):
         if self.switch_tema.get() == 1:
@@ -90,12 +93,12 @@ class ConversorApp(ctk.CTk):
 
     def selecionar_imagens(self):
         tipos = [("Imagens", "*.png *.jpg *.jpeg *.webp *.bmp *.gif"), ("Todos os arquivos", "*.*")]
-        # askopenfilenames (no plural) permite seleção múltipla usando Ctrl ou Shift
         caminhos = filedialog.askopenfilenames(filetypes=tipos)
         
         if caminhos:
             self.caminhos_arquivos = list(caminhos)
             total = len(self.caminhos_arquivos)
+            self.progresso.set(0)  # Reseta o progresso ao escolher novos arquivos
             
             if total == 1:
                 nome = os.path.basename(self.caminhos_arquivos[0])
@@ -110,24 +113,27 @@ class ConversorApp(ctk.CTk):
             messagebox.showwarning("Aviso", "Selecione pelo menos uma imagem antes de converter!")
             return
 
-        # Solicita a pasta onde todas as imagens convertidas serão salvas
-        pasta_destino = filedialog.askdirectory(title="Selecione a pasta para salvar as imagens convertidas")
+        pasta_destino = filedialog.askdirectory(title="Selecione a pasta para salvar as imagens")
 
         if not pasta_destino:
-            return  # Operação cancelada pelo usuário
+            return
 
         formato_saida = self.combo_formato.get().lower()
+        total = len(self.caminhos_arquivos)
         sucessos = 0
         erros = 0
 
-        for caminho in self.caminhos_arquivos:
+        # Bloqueia os botões durante o processamento para evitar cliques repetidos
+        self.btn_selecionar.configure(state="disabled")
+        self.btn_converter.configure(state="disabled")
+
+        for i, caminho in enumerate(self.caminhos_arquivos, start=1):
             try:
                 with Image.open(caminho) as img:
                     nome_base = os.path.splitext(os.path.basename(caminho))[0]
                     nome_saida = f"{nome_base}_convertido.{formato_saida}"
                     caminho_saida = os.path.join(pasta_destino, nome_saida)
 
-                    # Trata transparência RGBA caso o formato escolhido seja JPEG
                     if formato_saida in ['jpg', 'jpeg'] and img.mode in ('RGBA', 'LA', 'P'):
                         img = img.convert('RGB')
                     
@@ -136,7 +142,19 @@ class ConversorApp(ctk.CTk):
             except Exception:
                 erros += 1
 
-        # Resumo final do processo
+            # Calcula e atualiza a barra (valores de 0.0 a 1.0)
+            valor_progresso = i / total
+            self.progresso.set(valor_progresso)
+            self.lbl_status.configure(text=f"Convertendo: {i} de {total} ({int(valor_progresso * 100)}%)")
+            
+            # Força a interface a renderizar cada avanço
+            self.update_idletasks()
+
+        # Libera os botões novamente
+        self.btn_selecionar.configure(state="normal")
+        self.btn_converter.configure(state="normal")
+
+        # Exibe o resumo final
         mensagem = f"Processo concluído!\n\n✔ Imagens convertidas: {sucessos}"
         if erros > 0:
             mensagem += f"\n✖ Falhas: {erros}"
