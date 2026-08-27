@@ -1,5 +1,7 @@
 import os
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 from PIL import Image, ImageDraw
@@ -20,6 +22,8 @@ class PixelShiftApp(ctk.CTk):
         self.definir_icone_janela()
 
         self.caminhos_arquivos = []
+        self.cancelar_evento = threading.Event()
+        self.pasta_destino_atual = None
 
         # --- Paleta de Cores ---
         self.COLOR_BG = "#0B0B0E"
@@ -246,6 +250,14 @@ class PixelShiftApp(ctk.CTk):
         )
         self.btn_converter.pack(fill="x", side="bottom")
 
+        self.btn_cancelar = ctk.CTkButton(
+            self.body_op, text="CANCELAR", command=self.cancelar_conversao,
+            font=("Segoe UI", 10, "bold"), fg_color="transparent",
+            hover_color="#3A2025", text_color=self.COLOR_TEXT_MUTED,
+            corner_radius=4, height=28, state="disabled"
+        )
+        self.btn_cancelar.pack(fill="x", side="bottom", pady=(0, 6))
+
     def definir_icone_janela(self):
         try:
             ico_path = os.path.join(tempfile.gettempdir(), "pixelshift_app_icon.ico")
@@ -357,7 +369,7 @@ class PixelShiftApp(ctk.CTk):
         self.lbl_status.configure(text="Aguardando início...", text_color=self.COLOR_TEXT_MUTED)
 
     def converter_todas(self):
-        """Executa a conversão dos arquivos."""
+        """Executa a conversão em paralelo sem travar a interface."""
         if not self.caminhos_arquivos:
             messagebox.showwarning("ATENÇÃO", "Selecione ao menos um arquivo de imagem.")
             return
@@ -366,35 +378,141 @@ class PixelShiftApp(ctk.CTk):
         if not pasta_destino:
             return
 
+        self.pasta_destino_atual = pasta_destino
+        self.cancelar_evento.clear()
         formato_saida = self.combo_formato.get().lower()
-        total = len(self.caminhos_arquivos)
-        sucessos = 0
+        arquivos = list(self.caminhos_arquivos)
 
         self.btn_selecionar.configure(state="disabled")
         self.btn_converter.configure(state="disabled", text="CONVERTENDO...")
+        self.btn_cancelar.configure(state="normal")
 
-        for i, caminho in enumerate(self.caminhos_arquivos, start=1):
-            try:
-                with Image.open(caminho) as img:
-                    nome_base = os.path.splitext(os.path.basename(caminho))[0]
-                    caminho_saida = os.path.join(pasta_destino, f"{nome_base}_pixelshift.{formato_saida}")
+        threading.Thread(
+            target=self._processar_lote,
+            args=(arquivos, pasta_destino, formato_saida),
+            daemon=True
+        ).start()
 
-                    if formato_saida in ['jpg', 'jpeg'] and img.mode in ('RGBA', 'LA', 'P'):
-                        img = img.convert('RGB')
-                    
-                    img.save(caminho_saida, format=formato_saida.upper())
-                    sucessos += 1
-            except Exception:
-                pass
+    def _converter_arquivo(self, caminho, pasta_destino, formato_saida):
+        nome_base = os.path.splitext(os.path.basename(caminho))[0]
+        caminho_saida = os.path.join(
+            pasta_destino, f"{nome_base}_pixelshift.{formato_saida}"
+        )
 
-            val = i / total
-            self.progresso.set(val)
-            self.lbl_status.configure(text=f"Processando: {i}/{total} ({int(val * 100)}%)", text_color=self.COLOR_TEXT_WHITE)
-            self.update_idletasks()
+        # Evita sobrescrever arquivos existentes.
+        contador = 1
+        while os.path.exists(caminho_saida):
+            caminho_saida = os.path.join(
+                pasta_destino, f"{nome_base}_pixelshift_{contador}.{formato_saida}"
+            )
+            contador += 1
+
+        with Image.open(caminho) as original:
+            img = original.copy()
+
+        # Transparência -> fundo branco para formatos sem alpha.
+        if formato_saida in ("jpg", "jpeg") and img.mode in ("RGBA", "LA"):
+            fundo = Image.new("RGB", img.size, "white")
+            if img.mode == "RGBA":
+                fundo.paste(img, mask=img.getchannel("A"))
+            else:
+                fundo.paste(img.convert("RGB"), mask=img.getchannel("A"))
+            img = fundo
+        elif formato_saida in ("jpg", "jpeg") and img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+
+        img.save(caminho_saida, format=formato_saida.upper())
+        img.close()
+        return caminho, caminho_saida
+
+    def _processar_lote(self, arquivos, pasta_destino, formato_saida):
+        total = len(arquivos)
+        sucessos = []
+        erros = []
+
+        # Bom equilíbrio para imagens sem criar centenas de threads.
+        workers = min(8, max(2, os.cpu_count() or 2))
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futuros = {
+                executor.submit(
+                    self._converter_arquivo, caminho, pasta_destino, formato_saida
+                ): caminho
+                for caminho in arquivos
+            }
+
+            for i, futuro in enumerate(as_completed(futuros), 1):
+                caminho = futuros[futuro]
+
+                if self.cancelar_evento.is_set():
+                    for f in futuros:
+                        f.cancel()
+                    break
+
+                try:
+                    futuro.result()
+                    sucessos.append(caminho)
+                except Exception as e:
+                    erros.append((caminho, str(e)))
+
+                self.after(
+                    0, self._atualizar_progresso,
+                    i, total, os.path.basename(caminho)
+                )
+
+        self.after(0, self._finalizar_conversao, total, sucessos, erros)
+
+    def _atualizar_progresso(self, atual, total, nome):
+        val = atual / total
+        self.progresso.set(val)
+        self.lbl_status.configure(
+            text=f"Processando: {atual}/{total} ({int(val * 100)}%) — {nome}",
+            text_color=self.COLOR_TEXT_WHITE
+        )
+
+    def cancelar_conversao(self):
+        self.cancelar_evento.set()
+        self.lbl_status.configure(
+            text="Cancelando...", text_color=self.COLOR_DANGER_HOVER
+        )
+        self.btn_cancelar.configure(state="disabled")
+
+    def _finalizar_conversao(self, total, sucessos, erros):
+        cancelado = self.cancelar_evento.is_set()
 
         self.btn_selecionar.configure(state="normal")
         self.btn_converter.configure(state="normal", text="INICIAR CONVERSÃO")
-        messagebox.showinfo("CONCLUÍDO", f"Processamento finalizado!\n{sucessos} de {total} imagens convertidas.")
+        self.btn_cancelar.configure(state="disabled")
+
+        if cancelado:
+            self.lbl_status.configure(
+                text=f"Cancelado — {len(sucessos)} de {total} concluídas.",
+                text_color=self.COLOR_TEXT_MUTED
+            )
+            return
+
+        self.progresso.set(1)
+        self.lbl_status.configure(
+            text=f"Concluído — {len(sucessos)} de {total} convertidas.",
+            text_color=self.COLOR_SUCCESS
+        )
+
+        if erros:
+            detalhes = "\n".join(
+                f"• {os.path.basename(c)} — {erro}" for c, erro in erros[:10]
+            )
+            if len(erros) > 10:
+                detalhes += f"\n... e mais {len(erros) - 10} erro(s)."
+
+            messagebox.showwarning(
+                "CONCLUÍDO COM ERROS",
+                f"{len(sucessos)} convertidas e {len(erros)} falharam.\n\n{detalhes}"
+            )
+        else:
+            messagebox.showinfo(
+                "CONCLUÍDO",
+                f"Processamento finalizado!\n{len(sucessos)} de {total} imagens convertidas."
+            )
 
 if __name__ == "__main__":
     app = PixelShiftApp()
